@@ -20,6 +20,7 @@ public class RazerReading {
     public int Pid;
     public string Name;
     public int Level = -1;      // -1 = non disponibile
+    public string Type = "other"; // mouse, headset, keyboard, other
     public bool Charging;
 }
 
@@ -219,6 +220,29 @@ public static class RazerHid {
         }
     }
 
+    // ---------------- riconoscimento del tipo di dispositivo
+    static readonly string[] HeadsetWords  = { "blackshark", "kraken", "barracuda", "nari", "hammerhead", "headset", "hs 2.4" };
+    static readonly string[] MouseWords    = { "viper", "deathadder", "basilisk", "naga", "cobra", "orochi", "mamba", "lancehead", "atheris", "pro click", "mouse" };
+    static readonly string[] KeyboardWords = { "blackwidow", "huntsman", "ornata", "cynosa", "deathstalker", "pro type", "keyboard" };
+
+    static bool HasWord(string s, string[] words) {
+        foreach (var w in words) if (s.Contains(w)) return true;
+        return false;
+    }
+
+    static string DetectType(string names, List<Iface> ifs, bool headsetProto) {
+        if (headsetProto) return "headset";
+        string n = names.ToLowerInvariant();
+        if (HasWord(n, HeadsetWords)) return "headset";
+        if (HasWord(n, MouseWords)) return "mouse";
+        if (HasWord(n, KeyboardWords)) return "keyboard";
+        // ultima risorsa: il tipo di interfaccia USB (i mouse hanno spesso anche
+        // un'interfaccia tastiera per le macro, quindi il mouse ha la precedenza)
+        foreach (var it in ifs) if (it.UsagePage == 0x01 && it.Usage == 0x02) return "mouse";
+        foreach (var it in ifs) if (it.UsagePage == 0x01 && it.Usage == 0x06) return "keyboard";
+        return "other";
+    }
+
     static int[] TryAny(Iface it) {
         int[] r = null;
         if (it.FeatLen > 0) r = TryRead(it.Path, it.FeatLen, Tids);
@@ -263,6 +287,10 @@ public static class RazerHid {
             }
             var rd = new RazerReading { Pid = pid, Name = name };
             if (r != null) { rd.Level = r[0]; rd.Charging = r[1] == 1; }
+            bool headsetProto = r != null && cacheTid.ContainsKey(pid) && cacheTid[pid] == 0;
+            var allNames = new StringBuilder(name);
+            foreach (var it in ifs) allNames.Append(' ').Append(it.Product);
+            rd.Type = DetectType(allNames.ToString(), ifs, headsetProto);
             result.Add(rd);
         }
         return result;
@@ -308,12 +336,14 @@ Add-Type -AssemblyName System.Drawing
 
 $cfgPath = Join-Path $env:APPDATA 'razer_battery_widget.json'
 # mode: 'widget' = solo widget, 'tray' = solo icone nella barra, 'both' = entrambi
-$cfg = @{ x = 40; y = 40; topmost = $false; mode = 'widget' }
+# trayStyle: 'number' = percentuale nell'icona, 'glyph' = simbolo del dispositivo colorato
+$cfg = @{ x = 40; y = 40; topmost = $false; mode = 'widget'; trayStyle = 'number' }
 if (Test-Path $cfgPath) {
     try {
         $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
         $cfg.x = [int]$j.x; $cfg.y = [int]$j.y; $cfg.topmost = [bool]$j.topmost
         if ($j.mode -in @('widget', 'tray', 'both')) { $cfg.mode = [string]$j.mode }
+        if ($j.trayStyle -in @('number', 'glyph')) { $cfg.trayStyle = [string]$j.trayStyle }
     } catch {}
 }
 function Save-Cfg { try { ($cfg | ConvertTo-Json) | Set-Content -Path $cfgPath -Encoding UTF8 } catch {} }
@@ -330,6 +360,36 @@ $fName  = New-Object Drawing.Font('Segoe UI', 10)
 $fVal   = New-Object Drawing.Font('Segoe UI Symbol', 10, [Drawing.FontStyle]::Bold)
 $sfRight = New-Object Drawing.StringFormat
 $sfRight.Alignment = 'Far'
+
+# font di icone di Windows (Segoe MDL2 Assets su Win10/11, Segoe Fluent Icons su Win11)
+$script:glyphFontName = $null
+foreach ($fn in @('Segoe Fluent Icons', 'Segoe MDL2 Assets')) {
+    $tf = New-Object Drawing.Font($fn, 10)
+    if ($tf.Name -eq $fn) { $script:glyphFontName = $fn }
+    $tf.Dispose()
+    if ($script:glyphFontName) { break }
+}
+$glyphs = @{
+    mouse    = [string][char]0xE962
+    headset  = [string][char]0xE7F6
+    keyboard = [string][char]0xE765
+    other    = [string][char]0xE772
+}
+if ($script:glyphFontName) {
+    $fGlyph = New-Object Drawing.Font($script:glyphFontName, 12)
+    $iconW = 26
+} else {
+    $fGlyph = $null
+    $iconW = 0      # font non disponibile: niente icone
+}
+$sfCenter = New-Object Drawing.StringFormat
+$sfCenter.Alignment = 'Center'; $sfCenter.LineAlignment = 'Center'
+
+function Get-Glyph($type) {
+    $g = $glyphs[[string]$type]
+    if (-not $g) { $g = $glyphs['other'] }
+    return $g
+}
 
 function Get-LevelBrush([int]$lvl) {
     if ($lvl -lt 0) { return $brDim }
@@ -369,7 +429,7 @@ function Update-Layout {
             $nameW = [Math]::Max($nameW, [int]$g.MeasureString($script:msg, $fName).Width - $barW)
         }
     } finally { $g.Dispose() }
-    $script:barX = $pad + $nameW + 10
+    $script:barX = $pad + $iconW + $nameW + 10
     $form.Size = New-Object Drawing.Size(($script:barX + $barW + $valW + $pad), ($top + $rows * $rowH + 8))
 }
 
@@ -385,6 +445,37 @@ function Update-Data {
     Update-Layout
     $form.Invalidate()
     Update-Tray
+    Export-Status
+}
+
+# ------------------------------------------------------------------ esportazione per altri programmi
+# Scrive %APPDATA%\razer_battery_status.json a ogni aggiornamento, cosi' altri programmi
+# (es. il tema per il mini schermo) possono mostrare le batterie senza leggere l'USB.
+$statusPath = Join-Path $env:APPDATA 'razer_battery_status.json'
+
+function Export-Status {
+    try {
+        $list = @()
+        if ($script:data) {
+            foreach ($d in $script:data) {
+                $list += [ordered]@{
+                    name     = [string]$d.Name
+                    type     = [string]$d.Type
+                    level    = [int]$d.Level
+                    charging = [bool]$d.Charging
+                }
+            }
+        }
+        $obj = [ordered]@{
+            updated = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            devices = $list
+        }
+        $json = ConvertTo-Json -InputObject $obj -Depth 4
+        # scrittura atomica: prima un file temporaneo, poi lo sostituisco
+        $tmp = $statusPath + '.tmp'
+        [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding($false)))
+        Move-Item -Path $tmp -Destination $statusPath -Force
+    } catch {}
 }
 
 # ------------------------------------------------------------------ icone nella barra (area di notifica)
@@ -393,15 +484,21 @@ $script:trayIcons = @{}
 $brChg = New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(80, 190, 255))
 
 # disegna un'icona con il numero della percentuale
-function New-LevelIcon([int]$lvl, [bool]$charging) {
+# disegna un'icona con la percentuale oppure con il simbolo del dispositivo (colorato per livello)
+function New-LevelIcon([int]$lvl, [bool]$charging, [string]$type) {
     $sz = [Windows.Forms.SystemInformation]::SmallIconSize.Width
     $bmp = New-Object Drawing.Bitmap($sz, $sz)
     $g = [Drawing.Graphics]::FromImage($bmp)
     $g.TextRenderingHint = [Drawing.Text.TextRenderingHint]::AntiAliasGridFit
     $g.Clear([Drawing.Color]::Transparent)
-    if ($lvl -lt 0) { $txt = '-' } else { $txt = [string][Math]::Min($lvl, 100) }
-    if ($txt.Length -ge 3) { $px = $sz * 0.50 } else { $px = $sz * 0.72 }
-    $f = New-Object Drawing.Font('Segoe UI', [single]$px, [Drawing.FontStyle]::Bold, [Drawing.GraphicsUnit]::Pixel)
+    if ($cfg.trayStyle -eq 'glyph' -and $script:glyphFontName) {
+        $txt = Get-Glyph $type
+        $f = New-Object Drawing.Font($script:glyphFontName, [single]($sz * 0.80), [Drawing.FontStyle]::Regular, [Drawing.GraphicsUnit]::Pixel)
+    } else {
+        if ($lvl -lt 0) { $txt = '-' } else { $txt = [string][Math]::Min($lvl, 100) }
+        if ($txt.Length -ge 3) { $px = $sz * 0.50 } else { $px = $sz * 0.72 }
+        $f = New-Object Drawing.Font('Segoe UI', [single]$px, [Drawing.FontStyle]::Bold, [Drawing.GraphicsUnit]::Pixel)
+    }
     $sf = New-Object Drawing.StringFormat
     $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
     $g.DrawString($txt, $f, (Get-LevelBrush $lvl), (New-Object Drawing.RectangleF(0, 0, $sz, ($sz - 1))), $sf)
@@ -416,7 +513,7 @@ function Update-Tray {
     $seen = @{}
     if ($cfg.mode -ne 'widget') {
         if ($script:data) { $items = $script:data }
-        else { $items = @([pscustomobject]@{ Pid = 'none'; Name = 'Razer'; Level = -1; Charging = $false }) }
+        else { $items = @([pscustomobject]@{ Pid = 'none'; Name = 'Razer'; Level = -1; Charging = $false; Type = 'other' }) }
 
         foreach ($d in $items) {
             $key = [string]$d.Pid
@@ -429,7 +526,7 @@ function Update-Tray {
                 $script:trayIcons[$key] = $ni
             }
             $old = $ni.Icon
-            $ni.Icon = New-LevelIcon $d.Level $d.Charging
+            $ni.Icon = New-LevelIcon $d.Level $d.Charging $d.Type
             if ($old) { [void][RazerHid]::DestroyIcon($old.Handle); $old.Dispose() }
 
             if ($key -eq 'none')      { $tip = $script:msg }
@@ -475,7 +572,11 @@ $form.Add_Paint({
     }
     foreach ($d in $script:data) {
         $br = Get-LevelBrush $d.Level
-        $g.DrawString($d.Name, $fName, $brFg, $pad, $y)
+        if ($fGlyph) {
+            $grect = New-Object Drawing.RectangleF($pad, $y, ($iconW - 6), ($rowH - 4))
+            $g.DrawString((Get-Glyph $d.Type), $fGlyph, $brFg, $grect, $sfCenter)
+        }
+        $g.DrawString($d.Name, $fName, $brFg, ($pad + $iconW), $y)
         $g.FillRectangle($brTrk, $script:barX, $y + 8, $barW, 8)
         if ($d.Level -ge 0) {
             $g.FillRectangle($br, $script:barX, $y + 8, [int]($barW * $d.Level / 100), 8)
@@ -518,10 +619,26 @@ foreach ($pair in @(@('widget', 'Widget sul desktop'), @('tray', 'Icone nella ba
     [void]$miMode.DropDownItems.Add($it)
 }
 $miTop.Enabled = ($cfg.mode -ne 'tray')
+
+$miStyle = New-Object Windows.Forms.ToolStripMenuItem('Icone nella barra mostrano')
+foreach ($pair in @(@('number', 'Percentuale'), @('glyph', 'Simbolo del dispositivo'))) {
+    $it = New-Object Windows.Forms.ToolStripMenuItem($pair[1])
+    $it.Tag = $pair[0]
+    $it.Checked = ($cfg.trayStyle -eq $pair[0])
+    $it.Add_Click({
+        $cfg.trayStyle = $this.Tag
+        Save-Cfg
+        foreach ($x in $miStyle.DropDownItems) { $x.Checked = ($x.Tag -eq $cfg.trayStyle) }
+        Update-Tray
+    })
+    [void]$miStyle.DropDownItems.Add($it)
+}
+if (-not $script:glyphFontName) { $miStyle.Enabled = $false }
 $miExit = New-Object Windows.Forms.ToolStripMenuItem('Esci')
 $miExit.Add_Click({ $form.Close() })
 [void]$menu.Items.Add($miRefresh)
 [void]$menu.Items.Add($miMode)
+[void]$menu.Items.Add($miStyle)
 [void]$menu.Items.Add($miTop)
 [void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($miExit)

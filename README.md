@@ -5,10 +5,13 @@ Mini widget per Windows che mostra la batteria dei dispositivi wireless Razer, s
 ## Funzionalità
 
 - Percentuale di batteria e stato di ricarica per ogni dispositivo Razer collegato
+- Icona per tipo di dispositivo (mouse, cuffie, tastiera), riconosciuto dal nome del modello, dal protocollo o dal tipo di interfaccia USB
 - Tre modalità: widget sul desktop, icone nell'area di notifica, oppure entrambi
+- Icone nella barra a scelta con la percentuale o con il simbolo del dispositivo, colorati in base alla carica
 - Widget trascinabile, opzione "sempre in primo piano", posizione ricordata
 - Aggiornamento automatico ogni minuto
 - Supporta sia il protocollo dei mouse Razer (feature report) sia quello delle cuffie BlackShark HyperSpeed
+- Esporta lo stato in `%APPDATA%\razer_battery_status.json`, così altri programmi possono mostrare le batterie
 
 ## Dispositivi testati
 
@@ -29,7 +32,7 @@ Per avviarlo automaticamente all'accensione, premi `Win + R`, scrivi `shell:star
 ## Utilizzo
 
 - **Trascina** il widget con il tasto sinistro per spostarlo.
-- **Tasto destro** sul widget o su un'icona per aprire il menu: Aggiorna ora, Mostra come, Sempre in primo piano, Esci.
+- **Tasto destro** sul widget o su un'icona per aprire il menu: Aggiorna ora, Mostra come, Icone nella barra mostrano, Sempre in primo piano, Esci.
 - **Doppio clic** su un'icona nella barra per aggiornare subito.
 
 Su Windows 11 le icone nuove finiscono spesso nascoste dietro la freccia `^`. Per tenerle visibili: Impostazioni → Personalizzazione → Barra delle applicazioni → Altre icone della barra delle applicazioni → attiva "Windows PowerShell".
